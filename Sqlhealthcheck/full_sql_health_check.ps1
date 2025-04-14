@@ -1,84 +1,140 @@
-##
-
-
 <#
 .SYNOPSIS
-    Full SQL Server Health Check Script
+    Full SQL Server Health Check Script with HTML report and email alerts.
 .DESCRIPTION
-    This script checks:
-    - Always On AG Health
-    - SQL Backup status
-    - Disk space on all drives
-    - Generates HTML report (optional)
-.NOTES
-    Author: Your Name
+    Checks:
+      - Always On AG Health
+      - SQL Backup status (last 24 hrs)
+      - Disk space on all drives
+    Generates an HTML report and emails it (as HTML) if any issues are detected.
+.PARAMETER Instance
+    SQL Server instance name (default: localhost)
+.PARAMETER ReportPath
+    Full path where the HTML report will be saved
+.PARAMETER smtpServer
+    SMTP server for sending alerts
+.PARAMETER from
+    Email From address
+.PARAMETER to
+    Email To address
+.PARAMETER subject
+    Email subject
+.PARAMETER backupThresholdHours
+    Hours since last backup before flagging
+.PARAMETER diskFreeThresholdPercent
+    Minimum free disk percentage before flagging
 #>
 
-# Define SQL instance
-$Instance = "localhost"
-$Date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+param(
+    [string]$Instance               = "localhost",
+    [string]$ReportPath             = "$env:TEMP\Full_SQL_Health_Report.html",
+    [string]$smtpServer             = "smtp.yourdomain.com",
+    [string]$from                   = "sql-monitor@yourdomain.com",
+    [string]$to                     = "dba-team@yourdomain.com",
+    [string]$subject                = "SQL Server Full Health Report",
+    [int]   $backupThresholdHours   = 24,
+    [int]   $diskFreeThresholdPercent = 15
+)
 
-# Check AG Health
-Write-Output "`n[$Date] Checking Always On Availability Groups..."
+# Load SMO if needed for more advanced queries (optional)
+# Add-Type -AssemblyName "Microsoft.SqlServer.Smo"
+
+$issues = @()
+$html  = @()
+$html += "<html><body><h1>SQL Server Health Check - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</h1>"
+
+#
+# 1. Always On AG Health
+#
+$html += "<h2>Always On AG Health</h2><table border='1' cellpadding='5'><tr><th>AG</th><th>Replica</th><th>Role</th><th>Health</th></tr>"
 try {
-    $agStatus = Invoke-Sqlcmd -Query "
-        SELECT ag.name AS AGName, ar.replica_server_name, ar.role_desc, ar.availability_mode_desc, ars.synchronization_health_desc
+    $agRows = Invoke-Sqlcmd -ServerInstance $Instance -Query @"
+        SELECT ag.name AS AGName,
+               ar.replica_server_name AS Replica,
+               ars.role_desc AS Role,
+               ars.synchronization_health_desc AS Health
         FROM sys.availability_groups ag
         JOIN sys.availability_replicas ar ON ag.group_id = ar.group_id
         JOIN sys.dm_hadr_availability_replica_states ars ON ar.replica_id = ars.replica_id
-        WHERE ars.is_local = 1" -ServerInstance $Instance
-
-    $agStatus | Format-Table -AutoSize
+        WHERE ars.is_local = 1
+"@
+    foreach ($r in $agRows) {
+        $color = if ($r.Health -eq "HEALTHY") { "green" } else { "red"; $issues += "AG $($r.AGName) on $Instance: $($r.Health)" }
+        $html += "<tr><td>$($r.AGName)</td><td>$($r.Replica)</td><td>$($r.Role)</td><td style='color:$color;'>$($r.Health)</td></tr>"
+    }
 } catch {
-    Write-Warning "AG Health Check failed: $_"
+    $issues += "AG check error: $_"
 }
+$html += "</table>"
 
-# Check Backup Status (last 24 hours)
-Write-Output "`n[$Date] Checking Backup Status (last 24 hours)..."
+#
+# 2. Backup Status (last N hours)
+#
+$html += "<h2>Backup Status (last $backupThresholdHours hrs)</h2><table border='1' cellpadding='5'><tr><th>DB</th><th>Type</th><th>Last Backup</th><th>Status</th></tr>"
 try {
-    $backups = Invoke-Sqlcmd -Query "
-        SELECT d.name AS DatabaseName, MAX(b.backup_finish_date) AS LastBackupTime, b.type AS BackupType
+    $bk = Invoke-Sqlcmd -ServerInstance $Instance -Query @"
+        SELECT d.name AS DB,
+               MAX(b.backup_finish_date) AS LastBackup,
+               b.type AS Type
         FROM sys.databases d
         LEFT JOIN msdb.dbo.backupset b ON b.database_name = d.name
-        WHERE d.name NOT IN ('tempdb') AND b.backup_finish_date > DATEADD(hour, -24, GETDATE())
-        GROUP BY d.name, b.type" -ServerInstance $Instance
-
-    $backups | Format-Table -AutoSize
+        WHERE d.name <> 'tempdb'
+        GROUP BY d.name, b.type
+"@
+    foreach ($r in $bk) {
+        $hours = if ($r.LastBackup) { (New-TimeSpan -Start $r.LastBackup -End (Get-Date)).TotalHours } else { [double]::MaxValue }
+        if ($hours -le $backupThresholdHours) {
+            $status = "OK"; $color = "green"
+        } else {
+            $status = "OUTDATED"; $color = "red"
+            $issues += "$($r.DB) $($r.Type) backup $([math]::Round($hours,1)) hrs ago"
+        }
+        $lb = if ($r.LastBackup) { $r.LastBackup } else { "Never" }
+        $html += "<tr><td>$($r.DB)</td><td>$($r.Type)</td><td>$lb</td><td style='color:$color;'>$status</td></tr>"
+    }
 } catch {
-    Write-Warning "Backup Check failed: $_"
+    $issues += "Backup check error: $_"
 }
+$html += "</table>"
 
-# Check Disk Space
-Write-Output "`n[$Date] Checking Disk Space..."
+#
+# 3. Disk Space
+#
+$html += "<h2>Disk Space</h2><table border='1' cellpadding='5'><tr><th>Drive</th><th>Free GB</th><th>Total GB</th><th>Free %</th><th>Status</th></tr>"
 try {
-    Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID, @{Name="Free(GB)";Expression={"{0:N2}" -f ($_.FreeSpace/1GB)}}, @{Name="Total(GB)";Expression={"{0:N2}" -f ($_.Size/1GB)}}
+    $ds = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3"
+    foreach ($d in $ds) {
+        $free = [math]::Round($d.FreeSpace/1GB,2)
+        $tot  = [math]::Round($d.Size/1GB,2)
+        $pct  = [math]::Round(($free/$tot)*100,1)
+        if ($pct -ge $diskFreeThresholdPercent) {
+            $status = "OK"; $color = "green"
+        } else {
+            $status = "LOW"; $color = "red"
+            $issues += "Drive $($d.DeviceID) $pct% free"
+        }
+        $html += "<tr><td>$($d.DeviceID)</td><td>$free</td><td>$tot</td><td>$pct%</td><td style='color:$color;'>$status</td></tr>"
+    }
 } catch {
-    Write-Warning "Disk space check failed: $_"
+    $issues += "Disk check error: $_"
 }
+$html += "</table>"
 
-Write-Output "`n[$Date] Health check completed."
+# Finalize HTML and write report
+$html += "</body></html>"
+$html -join "`n" | Out-File $ReportPath
 
-# … after writing the HTML report to $ReportPath and populating $issues …
-
-# Only send email if there are issues
+# Send email if any issues
 if ($issues.Count -gt 0) {
-
-    # Read in the HTML report
     $htmlBody = Get-Content -Path $ReportPath -Raw
-
-    # Build a plain‑text summary for the email subject or fallback
-    $summary = ($issues | ForEach-Object { "• $_" }) -join "<br/>"
-
     Send-MailMessage `
         -From       $from `
         -To         $to `
         -Subject    $subject `
         -Body       $htmlBody `
         -BodyAsHtml `
-        -SmtpServer $smtpServer `
-        # If your SMTP requires authentication, uncomment and fill in:
-        # -Credential (Get-Credential) `
-        # -UseSsl `
-        # -Port 587
+        -SmtpServer $smtpServer
 }
+
+
 
