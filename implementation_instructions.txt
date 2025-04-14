@@ -1,0 +1,58 @@
+
+Ansible Playbook Implementation for SQL Server Always On Health Checks and Patching
+
+1. **Playbook Overview**:
+    This Ansible playbook is designed to automate the SQL Server Always On Availability Group health check and patching process. 
+    It is integrated with a ServiceNow pipeline to ensure automatic health checks, failovers, and patching steps for SQL Server nodes in an Availability Group. 
+    It includes health check validation, failover, patching for secondary and primary nodes, and HTML report generation.
+
+2. **Playbook Flow**:
+    - **Health Check**: The playbook starts by performing a health check on each node in the Availability Group.
+    - **Patch Secondary Nodes**: If the health check on a secondary node passes, it proceeds with patching.
+    - **Failover Logic**: After patching a secondary node, if it is the primary node, it will initiate a failover and move the role to the next available node.
+    - **Patch Primary Node**: The primary node will be patched after ensuring that the failover has been completed successfully.
+    - **HTML Report Generation**: After each health check, an HTML report will be generated and sent via email.
+
+3. **Playbook Files**:
+    - **main_playbook.yml**: The main orchestration playbook that integrates the health checks, patching steps, failover logic, and report generation.
+    - **patch_secondary.yml**: Contains the tasks specific to patching the secondary nodes.
+    - **patch_primary.yml**: Contains the tasks specific to patching the primary node after failover.
+    - **healthcheck_template.html.j2**: A Jinja2 template used for generating the HTML health check report.
+
+4. **Pre-Requisites**:
+    - Ansible must be set up and configured to communicate with your SQL Server nodes.
+    - You must have an Ansible template configured in your ServiceNow pipeline.
+    - The Windows team should have their patching playbook ready for integration, specifically for patching secondary and primary servers.
+    - Email configuration must be set up to send reports after health checks are completed.
+    - Ensure the nodes are part of your inventory managed by Ansible.
+
+5. **How to Use**:
+    - Store all playbook files in your GitHub repository.
+    - The ServiceNow pipeline should be configured to call the `main_playbook.yml` when a new patching cycle starts.
+    - Modify the health check logic if necessary to fit your specific environment.
+    - Modify the `patch_secondary.yml` and `patch_primary.yml` playbooks to match the patching tasks performed by your Windows team.
+    - Configure your email settings in the playbook to ensure reports are sent after health checks and failover.
+
+6. **File Locations**:
+    The following files have been provided for your setup:
+    - **main_playbook.yml**: Main orchestration playbook.
+    - **patch_secondary.yml**: Secondary node patching playbook.
+    - **patch_primary.yml**: Primary node patching playbook.
+    - **healthcheck_template.html.j2**: HTML report template for health checks.
+
+7. **Instructions for Integration with ServiceNow Pipeline**:
+    - Ensure your ServiceNow pipeline triggers the `main_playbook.yml` after the secondary nodes are patched.
+    - Add necessary logic in ServiceNow to ensure that the patching workflow is sequential and starts with the secondary nodes.
+    - The playbook will automatically handle failover and patch the primary node once the health check passes.
+    - Integration into ServiceNow should pass the node names, health check success/failure statuses, and other necessary details for patching.
+
+8. **Post-Patching Actions**:
+    - After patching is completed, the system will verify synchronization status.
+    - Once all patching steps are done, a final email with the health check report will be sent.
+
+9. **Customization**:
+    - Modify the health check steps and thresholds as required for your environment.
+    - The report generation logic can be customized for additional details or formatted output.
+    - Additional error handling can be added to address specific failure scenarios.
+
+If you encounter any issues during setup or execution, feel free to reach out for further clarification.
