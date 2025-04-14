@@ -1,0 +1,16 @@
+
+- name: Apply Windows Patches to Secondary Node
+  win_service:
+    name: wuauserv
+    state: stopped
+  # Stop Windows Update service to apply patches.
+
+- name: Install Updates (Secondary Node)
+  win_command: powershell.exe -Command "Install-WindowsUpdate -AcceptAll -AutoReboot"
+  # Run the patching task for secondary node.
+
+- name: Start Windows Update service
+  win_service:
+    name: wuauserv
+    state: started
+  # Start the Windows Update service again after patching.

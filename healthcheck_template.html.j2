@@ -1,0 +1,32 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>SQL AlwaysOn Health Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; }
+    table { width: 100%; border-collapse: collapse; }
+    table, th, td { border: 1px solid black; padding: 8px; }
+    th { text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>SQL AlwaysOn Health Report for {{ inventory_hostname }}</h1>
+  <table>
+    <tr>
+      <th>Replica Server Name</th>
+      <th>Role</th>
+      <th>Connected State</th>
+      <th>Synchronization Health</th>
+    </tr>
+    {% for row in health_data.stdout_lines %}
+      <tr>
+        <td>{{ row.replica_server_name }}</td>
+        <td>{{ row.role_desc }}</td>
+        <td>{{ row.connected_state_desc }}</td>
+        <td>{{ row.synchronization_health_desc }}</td>
+      </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>

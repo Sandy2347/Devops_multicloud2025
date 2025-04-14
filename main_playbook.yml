@@ -1,0 +1,148 @@
+
+---
+- name: SQL AlwaysOn Health Check & Patch Control
+  hosts: all
+  gather_facts: no
+  vars:
+    smtp_server: smtp.example.com  # SMTP server for email notifications
+    mail_from: sql-monitor@example.com  # From address for health check emails
+    mail_to: dba-team@example.com  # To address for health check email notifications
+    report_dir: "C:\Temp\sql_reports"  # Directory where HTML report is stored
+    success_flag: "C:\Temp\sql_healthcheck_success.txt"  # Flag file to indicate health check success
+
+  tasks:
+
+    # Ensure the directory for reports exists
+    - name: Ensure report directory exists
+      win_file:
+        path: "{{ report_dir }}"
+        state: directory
+      # This creates the directory to store the health check report. If it doesn't exist, it will be created.
+
+    # Get the replica role (PRIMARY or SECONDARY) for the current node
+    - name: Get replica role (PRIMARY/SECONDARY)
+      win_shell: |
+        $query = @"
+        SELECT rs.role_desc 
+        FROM sys.dm_hadr_availability_replica_states rs
+        JOIN sys.availability_replicas ar 
+          ON rs.replica_id = ar.replica_id
+        WHERE ar.replica_server_name = HOST_NAME();
+        "@
+        (Invoke-Sqlcmd -Query $query -ServerInstance "localhost").role_desc
+      register: replica_role
+      changed_when: false
+      args:
+        executable: powershell.exe
+      # This queries the SQL Server to get the role (PRIMARY/SECONDARY) of the current node in the Availability Group.
+
+    # Set facts based on the replica role (PRIMARY or SECONDARY)
+    - name: Set role facts
+      set_fact:
+        is_primary: "{{ replica_role.stdout == 'PRIMARY' }}"
+        is_secondary: "{{ replica_role.stdout == 'SECONDARY' }}"
+      # Based on the role fetched from the previous task, we set facts that determine whether the current node is primary or secondary.
+
+    # Run the health check query for all nodes
+    - name: Run health check for all nodes
+      win_shell: |
+        $query = @"
+        SELECT 
+          ar.replica_server_name,
+          rs.role_desc,
+          rs.connected_state_desc,
+          rs.synchronization_health_desc
+        FROM sys.dm_hadr_availability_replica_states rs
+        JOIN sys.availability_replicas ar 
+          ON rs.replica_id = ar.replica_id;
+        "@
+        Invoke-Sqlcmd -Query $query -ServerInstance "localhost"
+      register: health_data
+      args:
+        executable: powershell.exe
+      # This queries the health status (connected state and synchronization health) of each replica in the Availability Group.
+
+    # Generate an HTML report for the health check results
+    - name: Generate HTML health report
+      win_template:
+        src: healthcheck_template.html.j2
+        dest: "{{ report_dir }}\healthcheck_{{ inventory_hostname }}.html"
+      # Uses a Jinja2 template (healthcheck_template.html.j2) to create a detailed health check report in HTML format.
+
+    # Send the health report via email to the DBA team
+    - name: Email the health report
+      win_shell: |
+        Send-MailMessage -To "{{ mail_to }}" -From "{{ mail_from }}" `
+        -Subject "SQL AlwaysOn Health Report - {{ inventory_hostname }}" `
+        -BodyAsHtml (Get-Content '{{ report_dir }}\healthcheck_{{ inventory_hostname }}.html' -Raw) `
+        -SmtpServer "{{ smtp_server }}"
+      args:
+        executable: powershell.exe
+      # Sends the HTML health report as an email to the DBA team.
+
+    # If health is 'HEALTHY', create a success flag file for patching to proceed
+    - name: Validate health and allow patch if healthy
+      when: "'HEALTHY' in health_data.stdout"
+      win_file:
+        path: "{{ success_flag }}"
+        state: touch
+      # If the health check indicates the node is healthy, create a flag file (success.txt) to indicate readiness for patching.
+
+    # If health check fails, stop the playbook and fail the patching pipeline
+    - name: Fail pipeline if sync state is not healthy
+      when: "'HEALTHY' not in health_data.stdout"
+      fail:
+        msg: "Synchronization state not healthy on {{ inventory_hostname }}. Halting patch pipeline."
+      # If the node is not healthy, stop the process and fail the playbook. The pipeline will not proceed to patching.
+
+    # Skip failover and exit the playbook if the current node is secondary
+    - name: Skip failover and exit (secondary nodes only)
+      when: is_secondary
+      meta: end_play
+      # If the node is secondary, we skip the failover task and exit the playbook. Patching will proceed automatically.
+
+    # For Primary node, the failover process will initiate if the node is healthy
+    - name: Discover AG name (Primary only)
+      when: is_primary
+      win_shell: |
+        (Invoke-Sqlcmd -Query "SELECT name FROM sys.availability_groups;" -ServerInstance "localhost").name
+      register: ag_name
+      args:
+        executable: powershell.exe
+      # For primary nodes, we query the availability group name to prepare for failover.
+
+    # Initiate failover to a healthy secondary node for patching if primary node is healthy
+    - name: Initiate failover to healthy secondary (Primary only)
+      when: is_primary
+      win_shell: |
+        $query = @"
+        SELECT replica_server_name
+        FROM sys.dm_hadr_availability_replica_states rs
+        JOIN sys.availability_replicas ar 
+          ON rs.replica_id = ar.replica_id
+        WHERE rs.role_desc = 'SECONDARY'
+          AND rs.connected_state_desc = 'CONNECTED'
+          AND rs.synchronization_health_desc = 'HEALTHY'
+        "@
+        $target = (Invoke-Sqlcmd -Query $query -ServerInstance "localhost").replica_server_name[0]
+        if (!$target) {
+          Write-Error "No healthy secondary available for failover."
+          exit 1
+        }
+        $ag = "{{ ag_name.stdout_lines[0] }}"
+        Switch-SqlAvailabilityGroup -Path "SQLSERVER:\Sql\$env:COMPUTERNAME\Default\AvailabilityGroups\$ag" -To $target
+      args:
+        executable: powershell.exe
+      # If the node is primary, the script will attempt to failover to a healthy secondary node for patching.
+      
+    # Trigger patching of secondary node after health check passes
+    - name: Trigger patching of secondary (if health check passed)
+      when: is_secondary and "'HEALTHY' in health_data.stdout"
+      include_tasks: patch_secondary.yml
+      # If the node is secondary and healthy, it triggers the secondary node patching task file (patch_secondary.yml).
+
+    # Trigger patching of primary node after failover
+    - name: Trigger patching of primary node (after failover)
+      when: is_primary and "'HEALTHY' in health_data.stdout"
+      include_tasks: patch_primary.yml
+      # After failover, the playbook triggers the patching of the primary node (patch_primary.yml).
