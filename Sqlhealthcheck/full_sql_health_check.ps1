@@ -57,3 +57,28 @@ try {
 }
 
 Write-Output "`n[$Date] Health check completed."
+
+# … after writing the HTML report to $ReportPath and populating $issues …
+
+# Only send email if there are issues
+if ($issues.Count -gt 0) {
+
+    # Read in the HTML report
+    $htmlBody = Get-Content -Path $ReportPath -Raw
+
+    # Build a plain‑text summary for the email subject or fallback
+    $summary = ($issues | ForEach-Object { "• $_" }) -join "<br/>"
+
+    Send-MailMessage `
+        -From       $from `
+        -To         $to `
+        -Subject    $subject `
+        -Body       $htmlBody `
+        -BodyAsHtml `
+        -SmtpServer $smtpServer `
+        # If your SMTP requires authentication, uncomment and fill in:
+        # -Credential (Get-Credential) `
+        # -UseSsl `
+        # -Port 587
+}
+
