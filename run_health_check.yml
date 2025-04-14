@@ -1,0 +1,15 @@
+
+- name: Run SQL Full Health Check via GitHub
+  hosts: sql_nodes
+  gather_facts: no
+
+  vars:
+    github_script_url: "https://raw.githubusercontent.com/your-org/sql-monitoring/main/full_sql_health_check.ps1"
+
+  tasks:
+    - name: Run PowerShell health check from GitHub
+      win_shell: |
+        $scriptUrl = "{{ github_script_url }}"
+        $localPath = "$env:TEMP\full_sql_health_check.ps1"
+        Invoke-WebRequest -Uri $scriptUrl -OutFile $localPath -UseBasicParsing
+        powershell.exe -ExecutionPolicy Bypass -File $localPath
