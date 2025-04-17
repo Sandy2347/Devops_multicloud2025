@@ -1,0 +1,16 @@
+
+- name: Apply Windows Patches to Primary Node
+  win_service:
+    name: wuauserv
+    state: stopped
+  # Stop Windows Update service for the primary node.
+
+- name: Install Updates (Primary Node)
+  win_command: powershell.exe -Command "Install-WindowsUpdate -AcceptAll -AutoReboot"
+  # Run patching task for primary node.
+
+- name: Start Windows Update service
+  win_service:
+    name: wuauserv
+    state: started
+  # Start the Windows Update service again.
